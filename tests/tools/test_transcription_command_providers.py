@@ -455,6 +455,25 @@ class TestTranscribeCommandSTT:
         assert result["transcript"] == DEFAULT_COMMAND_STT_LANGUAGE
 
 
+    def test_context_is_passed_to_command_environment(self, tmp_path):
+        audio = _make_silent_wav(tmp_path / "input.wav")
+        interpreter = sys.executable
+        payload = "import os, sys; open(sys.argv[1], 'w').write(os.environ.get('HERMES_STT_CONTEXT', ''))"
+        cfg = {
+            "type": "command",
+            "command": f'"{interpreter}" -c "{payload}" {{output_path}}',
+        }
+        result = _transcribe_command_stt(
+            str(audio),
+            "fake-cli",
+            cfg,
+            {},
+            context="直近の会話: wayo Voice Archive。和洋は wayo。",
+        )
+        assert result["success"] is True
+        assert result["transcript"] == "直近の会話: wayo Voice Archive。和洋は wayo。"
+
+
 # ---------------------------------------------------------------------------
 # End-to-end via transcribe_audio(): dispatcher integration
 # ---------------------------------------------------------------------------
