@@ -115,6 +115,9 @@ DEFAULT_MISTRAL_STT_MODEL = os.getenv("STT_MISTRAL_MODEL", "voxtral-mini-latest"
 DEFAULT_ELEVENLABS_STT_MODEL = os.getenv("STT_ELEVENLABS_MODEL", "scribe_v2")
 LOCAL_STT_COMMAND_ENV = "HERMES_LOCAL_STT_COMMAND"
 LOCAL_STT_LANGUAGE_ENV = "HERMES_LOCAL_STT_LANGUAGE"
+STT_CONTEXT_ENV = "HERMES_STT_CONTEXT"
+STT_CONTEXT_FILE_ENV = "HERMES_STT_CONTEXT_FILE"
+DEFAULT_STT_CONTEXT_MAX_CHARS = 8000
 COMMON_LOCAL_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
 
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
@@ -294,6 +297,30 @@ def _normalize_local_model(model_name: Optional[str]) -> str:
 
 def _normalize_local_command_model(model_name: Optional[str]) -> str:
     return _normalize_local_model(model_name)
+
+
+def _normalize_stt_context(context: Optional[str], max_chars: int = DEFAULT_STT_CONTEXT_MAX_CHARS) -> str:
+    text = str(context or "").strip()
+    if not text:
+        return ""
+    return text[-max_chars:]
+
+
+def _command_stt_env(context: Optional[str], context_path: Optional[Path] = None) -> Optional[Dict[str, str]]:
+    text = _normalize_stt_context(context)
+    if not text:
+        return None
+    # Return only the two context variables. The caller merges these into the
+    # scrubbed child environment so unrelated Hermes credentials never leak.
+    env: Dict[str, str] = {}
+    env[STT_CONTEXT_ENV] = text
+    if context_path is not None:
+        try:
+            context_path.write_text(text, encoding="utf-8")
+            env[STT_CONTEXT_FILE_ENV] = str(context_path)
+        except OSError:
+            logger.debug("Failed to write STT context file at %s", context_path, exc_info=True)
+    return env
 
 
 def _try_lazy_install_stt() -> bool:
@@ -673,6 +700,7 @@ def _run_command_stt(
     command: str,
     timeout: float,
     env_passthrough: Optional[list] = None,
+    context_env: Optional[Dict[str, str]] = None,
 ) -> subprocess.CompletedProcess:
     """Run a command-provider shell command with process-tree idle cleanup.
 
@@ -691,6 +719,10 @@ def _run_command_stt(
         value = os.environ.get(key)
         if value is not None:
             scrubbed[key] = value
+    for key, value in (context_env or {}).items():
+        if key in {STT_CONTEXT_ENV, STT_CONTEXT_FILE_ENV}:
+            scrubbed[key] = value
+    child_env = delegated_child_subprocess_env(scrubbed)
     popen_kwargs: Dict[str, Any] = {
         "shell": True,
         "stdout": subprocess.PIPE,
@@ -700,7 +732,7 @@ def _run_command_stt(
         # must not raise in the reader threads on non-UTF-8 Windows (#45099).
         "encoding": "utf-8",
         "errors": "replace",
-        "env": delegated_child_subprocess_env(scrubbed),
+        "env": child_env,
     }
     if os.name == "nt":
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -838,6 +870,7 @@ def _transcribe_command_stt(
     config: Dict[str, Any],
     stt_config: Dict[str, Any],
     model_override: Optional[str] = None,
+    context: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Transcribe via a user-declared ``stt.providers.<name>: type: command``.
 
@@ -897,6 +930,7 @@ def _transcribe_command_stt(
                 "model": str(model),
             }
             command = _render_command_stt_template(command_template, placeholders)
+            command_env = _command_stt_env(context, output_path.parent / "context.txt")
             logger.info(
                 "Transcribing %s via command STT provider '%s'...",
                 audio.name, provider_name,
@@ -906,6 +940,7 @@ def _transcribe_command_stt(
                     command,
                     timeout,
                     env_passthrough=_command_stt_env_passthrough(config),
+                    context_env=command_env,
                 )
             except subprocess.TimeoutExpired:
                 return {
@@ -1728,7 +1763,7 @@ def _convert_caf_to_wav(file_path: str) -> Optional[str]:
     return None
 
 
-def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_local_command(file_path: str, model_name: str, context: Optional[str] = None) -> Dict[str, Any]:
     """Run the configured local STT command template and read back a .txt transcript."""
     command_template = _get_local_command_template()
     if not command_template:
@@ -1762,6 +1797,9 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
             from tools.environments.local import hermes_subprocess_env
 
             child_env = hermes_subprocess_env(inherit_credentials=False)
+            child_env.update(
+                _command_stt_env(context, Path(output_dir) / "context.txt") or {}
+            )
             subprocess.run(
                 shlex.split(command),
                 check=True,
@@ -2338,7 +2376,11 @@ def _transcribe_deepinfra(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_prepared_audio(file_path: str, model: Optional[str] = None) -> Dict[str, Any]:
+def _transcribe_prepared_audio(
+    file_path: str,
+    model: Optional[str] = None,
+    context: Optional[str] = None,
+) -> Dict[str, Any]:
     """
     Transcribe an audio file using the configured STT provider.
 
@@ -2349,6 +2391,8 @@ def _transcribe_prepared_audio(file_path: str, model: Optional[str] = None) -> D
     Args:
         file_path: Absolute path to the audio file to transcribe.
         model:     Override the model. If None, uses config or provider default.
+        context:   Optional recent conversation context passed only to command
+                   providers via HERMES_STT_CONTEXT / HERMES_STT_CONTEXT_FILE.
 
     Returns:
         dict with keys:
@@ -2409,7 +2453,7 @@ def _transcribe_prepared_audio(file_path: str, model: Optional[str] = None) -> D
         model_name = _normalize_local_command_model(
             model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
         )
-        return _transcribe_local_command(file_path, model_name)
+        return _transcribe_local_command(file_path, model_name, context=context)
 
     if provider == "groq":
         groq_cfg = stt_config.get("groq") or {}
@@ -2456,6 +2500,7 @@ def _transcribe_prepared_audio(file_path: str, model: Optional[str] = None) -> D
             command_provider_config,
             stt_config,
             model_override=model,
+            context=context,
         )
 
     # Plugin-registered STT backend (e.g. OpenRouter, SenseAudio,
@@ -2508,7 +2553,11 @@ def _transcribe_prepared_audio(file_path: str, model: Optional[str] = None) -> D
     }
 
 
-def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, Any]:
+def transcribe_audio(
+    file_path: str,
+    model: Optional[str] = None,
+    context: Optional[str] = None,
+) -> Dict[str, Any]:
     """Safely validate, preprocess supported inputs, and dispatch transcription."""
     # Refuse to feed a credential / secret store (auth.json, .env, OAuth
     # tokens, mcp-tokens/, ...) to an STT provider — before ANY validation or
@@ -2541,7 +2590,7 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         prepared_error = _validate_audio_file(prepared_path, enforce_size_limit=False)
         if prepared_error:
             return prepared_error
-        return _transcribe_prepared_audio(prepared_path, model)
+        return _transcribe_prepared_audio(prepared_path, model, context=context)
     finally:
         if cleanup_dir:
             shutil.rmtree(cleanup_dir, ignore_errors=True)
@@ -2575,6 +2624,7 @@ def _is_local_or_private_url(url: str) -> bool:
 def transcribe_audio_local_fallback(
     file_path: str,
     model: Optional[str] = None,
+    context: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Try an already-installed local STT backend without changing config.
 
@@ -2599,6 +2649,7 @@ def transcribe_audio_local_fallback(
         return _transcribe_local_command(
             file_path,
             _normalize_local_command_model(local_model),
+            context=context,
         )
     return {
         "success": False,
