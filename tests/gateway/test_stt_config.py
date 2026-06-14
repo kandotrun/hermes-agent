@@ -142,6 +142,59 @@ async def test_enrich_message_with_transcription_returns_tuple_for_empty_content
 
 
 @pytest.mark.asyncio
+async def test_prepare_inbound_message_text_passes_recent_history_to_stt_context():
+    from gateway.run import GatewayRunner
+
+    runner = GatewayRunner.__new__(GatewayRunner)
+    runner.config = GatewayConfig(stt_enabled=True)
+    runner.adapters = {}
+    runner._model = "test-model"
+    runner._base_url = ""
+    runner._has_setup_skill = lambda: False
+
+    source = SessionSource(
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_type="group",
+        user_name="Kan",
+    )
+    event = MessageEvent(
+        text="",
+        message_type=MessageType.VOICE,
+        source=source,
+        media_urls=["/tmp/queued-voice.ogg"],
+        media_types=["audio/ogg"],
+    )
+    calls = []
+
+    def fake_transcribe(path, *, context=None):
+        calls.append({"path": path, "context": context})
+        return {
+            "success": True,
+            "transcript": "MCPのリクエストではwayoを使います",
+            "provider": "local_command",
+        }
+
+    history = [
+        {"role": "user", "content": "voice.2-38.com の wayo Voice Archive をHonoに移行したい"},
+        {"role": "assistant", "content": "wayo APIはHono on Cloudflare Workersで進めます"},
+    ]
+    with patch("tools.transcription_tools.transcribe_audio", side_effect=fake_transcribe):
+        result = await runner._prepare_inbound_message_text(
+            event=event,
+            source=source,
+            history=history,
+        )
+
+    assert result is not None
+    assert calls
+    assert "wayo Voice Archive" in calls[0]["context"]
+    assert "Hono on Cloudflare Workers" in calls[0]["context"]
+    assert "queued-voice.ogg" not in calls[0]["context"]
+    assert "MCPのリクエストではwayo" in result
+
+
+@pytest.mark.asyncio
 async def test_prepare_inbound_message_text_transcribes_queued_voice_event():
     from gateway.run import GatewayRunner
 

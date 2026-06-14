@@ -8096,9 +8096,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     )
 
             if audio_paths:
+                stt_context = self._build_transcription_context(message_text, history)
                 message_text, _successful_transcripts = await self._enrich_message_with_transcription(
                     message_text,
                     audio_paths,
+                    context=stt_context,
                 )
                 # Echo each successful transcript back to the user immediately,
                 # before the agent loop runs. Lets the user verify STT quality
@@ -12241,10 +12243,51 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return prefix
         return user_text
 
+    def _build_transcription_context(
+        self,
+        user_text: str,
+        history: List[Dict[str, Any]],
+        *,
+        max_chars: int = 8000,
+    ) -> str:
+        """Build short, non-persisted context for STT disambiguation.
+
+        This is sent only to the STT provider/command so post-processing can
+        preserve project-specific terms like "wayo" instead of choosing a
+        phonetically plausible kanji form. It is intentionally not injected into
+        the final user message or saved separately.
+        """
+        parts: List[str] = []
+        for item in (history or [])[-8:]:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or item.get("sender") or "message").strip() or "message"
+            if role.lower() in {"tool", "system"}:
+                continue
+            content = item.get("content") or item.get("text") or ""
+            if not isinstance(content, str):
+                try:
+                    content = json.dumps(content, ensure_ascii=False)
+                except Exception:
+                    content = str(content)
+            content = content.strip()
+            if content:
+                parts.append(f"{role}: {content}")
+        current = (user_text or "").strip()
+        placeholder = "(The user sent a message with no text content)"
+        if current and current != placeholder:
+            parts.append(f"current caption/context: {current}")
+        context = "\n".join(parts).strip()
+        if len(context) > max_chars:
+            context = context[-max_chars:]
+        return context
+
     async def _enrich_message_with_transcription(
         self,
         user_text: str,
         audio_paths: List[str],
+        *,
+        context: str | None = None,
     ) -> tuple[str, List[str]]:
         """
         Auto-transcribe user voice/audio messages using the configured STT provider
@@ -12291,7 +12334,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         for path in audio_paths:
             try:
                 logger.debug("Transcribing user voice: %s", path)
-                result = await asyncio.to_thread(transcribe_audio, path)
+                if context:
+                    result = await asyncio.to_thread(transcribe_audio, path, context=context)
+                else:
+                    result = await asyncio.to_thread(transcribe_audio, path)
                 if result["success"]:
                     transcript = result["transcript"]
                     successful_transcripts.append(transcript)

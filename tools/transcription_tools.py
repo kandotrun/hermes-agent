@@ -92,6 +92,9 @@ DEFAULT_MISTRAL_STT_MODEL = os.getenv("STT_MISTRAL_MODEL", "voxtral-mini-latest"
 DEFAULT_ELEVENLABS_STT_MODEL = os.getenv("STT_ELEVENLABS_MODEL", "scribe_v2")
 LOCAL_STT_COMMAND_ENV = "HERMES_LOCAL_STT_COMMAND"
 LOCAL_STT_LANGUAGE_ENV = "HERMES_LOCAL_STT_LANGUAGE"
+STT_CONTEXT_ENV = "HERMES_STT_CONTEXT"
+STT_CONTEXT_FILE_ENV = "HERMES_STT_CONTEXT_FILE"
+DEFAULT_STT_CONTEXT_MAX_CHARS = 8000
 COMMON_LOCAL_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
 
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
@@ -202,6 +205,28 @@ def _normalize_local_model(model_name: Optional[str]) -> str:
 
 def _normalize_local_command_model(model_name: Optional[str]) -> str:
     return _normalize_local_model(model_name)
+
+
+def _normalize_stt_context(context: Optional[str], max_chars: int = DEFAULT_STT_CONTEXT_MAX_CHARS) -> str:
+    text = str(context or "").strip()
+    if not text:
+        return ""
+    return text[-max_chars:]
+
+
+def _command_stt_env(context: Optional[str], context_path: Optional[Path] = None) -> Optional[Dict[str, str]]:
+    text = _normalize_stt_context(context)
+    if not text:
+        return None
+    env = os.environ.copy()
+    env[STT_CONTEXT_ENV] = text
+    if context_path is not None:
+        try:
+            context_path.write_text(text, encoding="utf-8")
+            env[STT_CONTEXT_FILE_ENV] = str(context_path)
+        except OSError:
+            logger.debug("Failed to write STT context file at %s", context_path, exc_info=True)
+    return env
 
 
 def _try_lazy_install_stt() -> bool:
@@ -540,7 +565,7 @@ def _terminate_command_stt_process_tree(proc: subprocess.Popen) -> None:
         proc.kill()
 
 
-def _run_command_stt(command: str, timeout: float) -> subprocess.CompletedProcess:
+def _run_command_stt(command: str, timeout: float, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
     """Run a command-provider shell command with process-tree timeout cleanup.
 
     Mirrors ``tools.tts_tool._run_command_tts``.
@@ -550,6 +575,7 @@ def _run_command_stt(command: str, timeout: float) -> subprocess.CompletedProces
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
         "text": True,
+        "env": env,
     }
     if os.name == "nt":
         popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -619,6 +645,7 @@ def _transcribe_command_stt(
     config: Dict[str, Any],
     stt_config: Dict[str, Any],
     model_override: Optional[str] = None,
+    context: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Transcribe via a user-declared ``stt.providers.<name>: type: command``.
 
@@ -678,12 +705,13 @@ def _transcribe_command_stt(
                 "model": str(model),
             }
             command = _render_command_stt_template(command_template, placeholders)
+            command_env = _command_stt_env(context, output_path.parent / "context.txt")
             logger.info(
                 "Transcribing %s via command STT provider '%s'...",
                 audio.name, provider_name,
             )
             try:
-                result = _run_command_stt(command, timeout)
+                result = _run_command_stt(command, timeout, env=command_env)
             except subprocess.TimeoutExpired:
                 return {
                     "success": False,
@@ -1198,7 +1226,7 @@ def _prepare_local_audio(file_path: str, work_dir: str) -> tuple[Optional[str], 
         return None, f"Failed to convert audio for local STT: {details}"
 
 
-def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_local_command(file_path: str, model_name: str, context: Optional[str] = None) -> Dict[str, Any]:
     """Run the configured local STT command template and read back a .txt transcript."""
     command_template = _get_local_command_template()
     if not command_template:
@@ -1231,11 +1259,12 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
                 model=shlex.quote(normalized_model),
             )
             # User-provided templates (env var) may contain shell syntax; auto-detected commands are safe for list mode.
+            command_env = _command_stt_env(context, Path(output_dir) / "context.txt")
             use_shell = bool(os.getenv(LOCAL_STT_COMMAND_ENV, "").strip())
             if use_shell:
-                subprocess.run(command, shell=True, check=True, capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
+                subprocess.run(command, shell=True, check=True, capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL, env=command_env)
             else:
-                subprocess.run(shlex.split(command), check=True, capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
+                subprocess.run(shlex.split(command), check=True, capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL, env=command_env)
             
 
             txt_files = sorted(Path(output_dir).glob("*.txt"))
@@ -1620,7 +1649,7 @@ def _transcribe_elevenlabs(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, Any]:
+def transcribe_audio(file_path: str, model: Optional[str] = None, context: Optional[str] = None) -> Dict[str, Any]:
     """
     Transcribe an audio file using the configured STT provider.
 
@@ -1631,6 +1660,8 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
     Args:
         file_path: Absolute path to the audio file to transcribe.
         model:     Override the model. If None, uses config or provider default.
+        context:   Optional recent conversation context passed only to command
+                   providers via HERMES_STT_CONTEXT / HERMES_STT_CONTEXT_FILE.
 
     Returns:
         dict with keys:
@@ -1667,7 +1698,7 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         model_name = _normalize_local_command_model(
             model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
         )
-        return _transcribe_local_command(file_path, model_name)
+        return _transcribe_local_command(file_path, model_name, context=context)
 
     if provider == "groq":
         model_name = model or DEFAULT_GROQ_STT_MODEL
@@ -1707,6 +1738,7 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
             command_provider_config,
             stt_config,
             model_override=model,
+            context=context,
         )
 
     # Plugin-registered STT backend (e.g. OpenRouter, SenseAudio,
