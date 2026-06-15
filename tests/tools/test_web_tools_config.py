@@ -259,6 +259,7 @@ class TestBackendSelection:
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
         "TAVILY_API_KEY",
+        "PERPLEXITY_API_KEY",
     )
 
     def setup_method(self):
@@ -311,6 +312,12 @@ class TestBackendSelection:
         with patch("tools.web_tools._load_web_config", return_value={"backend": "tavily"}), \
              patch.dict(os.environ, {"FIRECRAWL_API_KEY": "fc-test"}):
             assert _get_backend() == "tavily"
+
+    def test_config_perplexity(self):
+        """web.backend=perplexity in config → 'perplexity'."""
+        from tools.web_tools import _get_backend
+        with patch("tools.web_tools._load_web_config", return_value={"backend": "perplexity"}):
+            assert _get_backend() == "perplexity"
 
     def test_config_case_insensitive(self):
         """web.backend=Parallel (mixed case) → 'parallel'."""
@@ -383,6 +390,22 @@ class TestBackendSelection:
         with patch("tools.web_tools._load_web_config", return_value={}), \
              patch.dict(os.environ, {"FIRECRAWL_API_KEY": "fc-test"}):
             assert _get_backend() == "firecrawl"
+
+    def test_fallback_perplexity_only_key_for_search(self):
+        """Only PERPLEXITY_API_KEY set → search backend is 'perplexity'."""
+        from tools.web_tools import _get_backend
+        with patch("tools.web_tools._load_web_config", return_value={}), \
+             patch.dict(os.environ, {"PERPLEXITY_API_KEY": "pplx-test"}):
+            assert _get_backend() == "perplexity"
+
+    def test_extract_auto_detect_skips_perplexity_search_only_key(self):
+        """PERPLEXITY_API_KEY should not make web_extract choose search-only Perplexity."""
+        from tools.web_tools import _get_extract_backend
+        with patch("tools.web_tools._load_web_config", return_value={}), \
+             patch("tools.web_tools._is_tool_gateway_ready", return_value=False), \
+             patch("tools.web_tools._ddgs_package_importable", return_value=False), \
+             patch.dict(os.environ, {"PERPLEXITY_API_KEY": "pplx-test"}):
+            assert _get_extract_backend() == "firecrawl"
 
     def test_fallback_no_keys_defaults_to_firecrawl(self):
         """No keys, no config → 'firecrawl' (will fail at client init)."""
@@ -581,6 +604,7 @@ class TestCheckWebApiKey:
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
         "TAVILY_API_KEY",
+        "PERPLEXITY_API_KEY",
     )
 
     def setup_method(self):
