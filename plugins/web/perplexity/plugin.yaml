@@ -1,0 +1,7 @@
+name: web-perplexity
+version: 1.0.1
+description: "Perplexity Search API provider for Hermes web_search. Search-only; requires PERPLEXITY_API_KEY and calls POST /search for raw ranked results without Sonar/chat-completions."
+author: NousResearch
+kind: backend
+provides_web_providers:
+  - perplexity
