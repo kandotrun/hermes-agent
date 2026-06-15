@@ -172,6 +172,12 @@ _LEGACY_WEB_BACKENDS = frozenset(
     {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}
 )
 
+# Built-in or Kan-carried backends that only service web_search. Skip these
+# during automatic extract selection so a search credential does not shadow
+# extract-capable providers. Explicit config still surfaces a typed
+# search-only error downstream.
+_SEARCH_ONLY_BACKENDS = frozenset({"searxng", "brave-free", "ddgs", "xai", "perplexity"})
+
 
 def _registered_web_provider(backend: str):
     """Return a plugin-registered web provider by name, or ``None``.
@@ -220,12 +226,14 @@ def _list_registered_web_providers():
         return []
 
 
-def _get_backend() -> str:
+def _get_backend(capability: str = "search") -> str:
     """Determine which web backend to use (shared fallback).
 
     Reads ``web.backend`` from config.yaml (set by ``hermes tools``).
     Falls back to whichever API key is present for users who configured
-    keys manually without running setup.
+    keys manually without running setup. For extract auto-detect, search-only
+    credentials are skipped so ``web.search_backend: perplexity`` does not
+    make ``web_extract`` choose a search-only provider.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
     if configured in _LEGACY_WEB_BACKENDS or _registered_web_provider(configured) is not None:
@@ -244,11 +252,14 @@ def _get_backend() -> str:
         ("parallel", _has_env("PARALLEL_API_KEY")),
         ("firecrawl", _has_env("FIRECRAWL_API_KEY") or _has_env("FIRECRAWL_API_URL")),
         ("firecrawl", _is_tool_gateway_ready()),
+        ("perplexity", _has_env("PERPLEXITY_API_KEY")),
         ("searxng", _has_env("SEARXNG_URL")),
         ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")),
         ("ddgs", _ddgs_package_importable()),
     )
     for backend, available in backend_candidates:
+        if capability == "extract" and backend in _SEARCH_ONLY_BACKENDS:
+            continue
         if available:
             return backend
 
@@ -262,6 +273,10 @@ def _get_backend() -> str:
         if provider.name in _LEGACY_WEB_BACKENDS:
             continue
         try:
+            if capability == "extract" and not provider.supports_extract():
+                continue
+            if capability == "search" and not provider.supports_search():
+                continue
             if provider.is_available():
                 return provider.name
         except Exception as exc:  # noqa: BLE001 — a broken provider is skipped
@@ -305,7 +320,7 @@ def _get_capability_backend(capability: str) -> str:
     specific = (cfg.get(f"{capability}_backend") or "").lower().strip()
     if specific and _is_backend_available(specific):
         return specific
-    return _get_backend()
+    return _get_backend(capability)
 
 
 def _is_backend_available(backend: str) -> bool:
@@ -349,6 +364,8 @@ def _is_backend_available(backend: str) -> bool:
             return has_xai_credentials()
         except Exception:
             return False
+    if backend == "perplexity":
+        return _has_env("PERPLEXITY_API_KEY")
     return False
 
 
@@ -398,6 +415,7 @@ def _web_requires_env() -> list[str]:
         "TOOL_GATEWAY_DOMAIN",
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
+        "PERPLEXITY_API_KEY",
     ]
 
 
