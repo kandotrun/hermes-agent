@@ -141,15 +141,31 @@ def _load_web_config() -> dict:
     except (ImportError, Exception):
         return {}
 
-def _get_backend() -> str:
+
+# Recognized web backend names (config values accepted in ``web.backend`` /
+# ``web.search_backend`` / ``web.extract_backend``).
+_KNOWN_WEB_BACKENDS = frozenset(
+    {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai", "perplexity"}
+)
+
+# Backends that only service web_search. They are skipped during extract
+# auto-detect so a search-only credential does not shadow extract-capable
+# backends. Explicit extract/backend config still returns the named provider
+# and surfaces a typed search-only error downstream.
+_SEARCH_ONLY_BACKENDS = frozenset({"searxng", "brave-free", "ddgs", "xai", "perplexity"})
+
+
+def _get_backend(capability: str = "search") -> str:
     """Determine which web backend to use (shared fallback).
 
     Reads ``web.backend`` from config.yaml (set by ``hermes tools``).
     Falls back to whichever API key is present for users who configured
-    keys manually without running setup.
+    keys manually without running setup. For extract auto-detect, search-only
+    credentials are skipped so ``web.search_backend: perplexity`` does not
+    make ``web_extract`` choose a search-only provider.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}:
+    if configured in _KNOWN_WEB_BACKENDS:
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -165,11 +181,14 @@ def _get_backend() -> str:
         ("parallel", _has_env("PARALLEL_API_KEY")),
         ("firecrawl", _has_env("FIRECRAWL_API_KEY") or _has_env("FIRECRAWL_API_URL")),
         ("firecrawl", _is_tool_gateway_ready()),
+        ("perplexity", _has_env("PERPLEXITY_API_KEY")),
         ("searxng", _has_env("SEARXNG_URL")),
         ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")),
         ("ddgs", _ddgs_package_importable()),
     )
     for backend, available in backend_candidates:
+        if capability == "extract" and backend in _SEARCH_ONLY_BACKENDS:
+            continue
         if available:
             return backend
 
@@ -211,7 +230,7 @@ def _get_capability_backend(capability: str) -> str:
     specific = (cfg.get(f"{capability}_backend") or "").lower().strip()
     if specific and _is_backend_available(specific):
         return specific
-    return _get_backend()
+    return _get_backend(capability)
 
 
 def _is_backend_available(backend: str) -> bool:
@@ -240,6 +259,8 @@ def _is_backend_available(backend: str) -> bool:
             return has_xai_credentials()
         except Exception:
             return False
+    if backend == "perplexity":
+        return _has_env("PERPLEXITY_API_KEY")
     return False
 
 
@@ -289,6 +310,7 @@ def _web_requires_env() -> list[str]:
         "TOOL_GATEWAY_DOMAIN",
         "TOOL_GATEWAY_SCHEME",
         "TOOL_GATEWAY_USER_TOKEN",
+        "PERPLEXITY_API_KEY",
     ]
 
 
