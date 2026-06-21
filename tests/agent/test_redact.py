@@ -137,33 +137,42 @@ class TestJsonFields:
 
 class TestAuthHeaders:
     def test_bearer_token(self):
-        text = "Authorization: Bearer sk-proj-abc123def456ghi789jkl012"
+        secret = "fixture-" + "bearer-token-for-redaction-only"
+        text = "Authorization: Bearer " + secret
         result = redact_sensitive_text(text)
         assert "Authorization: Bearer" in result
-        assert "abc123def456" not in result
+        assert secret not in result
+        assert "..." in result
 
     def test_case_insensitive(self):
-        text = "authorization: bearer mytoken123456789012345678"
+        secret = "fixture-" + "lowercase-bearer-token"
+        text = "authorization: bearer " + secret
         result = redact_sensitive_text(text)
-        assert "mytoken12345" not in result
+        assert secret not in result
+        assert "..." in result
 
     def test_basic_auth_credentials_masked(self):
-        # base64 of "user:longpassword1234" — leaks user:pass if not redacted.
-        text = "Authorization: Basic dXNlcjpsb25ncGFzc3dvcmQxMjM0"
+        secret = "fixture-" + "basic-auth-credentials"
+        text = "Authorization: Basic " + secret
         result = redact_sensitive_text(text)
         assert "Authorization: Basic" in result
-        assert "dXNlcjpsb25ncGFzc3dvcmQxMjM0" not in result
+        assert secret not in result
+        assert "..." in result
 
     def test_token_scheme_masked(self):
-        text = "Authorization: token opaque-credential-1234567890"
+        secret = "fixture-" + "opaque-credential-token"
+        text = "Authorization: token " + secret
         result = redact_sensitive_text(text)
         assert "Authorization: token" in result
-        assert "opaque-credential" not in result
+        assert secret not in result
+        assert "..." in result
 
     def test_proxy_authorization_masked(self):
-        text = "Proxy-Authorization: Basic dXNlcjpzdXBlcnNlY3JldDEyMzQ="
+        secret = "fixture-" + "proxy-auth-credentials"
+        text = "Proxy-Authorization: Basic " + secret
         result = redact_sensitive_text(text)
-        assert "dXNlcjpzdXBlcnNlY3JldDEyMzQ=" not in result
+        assert secret not in result
+        assert "..." in result
 
     def test_authorization_prose_unchanged(self):
         # "authorization" without a colon-delimited value is plain prose.
@@ -175,32 +184,40 @@ class TestAuthHeaders:
         # double quote must NOT pull that quote into the mask. Greedy \S+
         # used to eat it, turning value corruption into syntax corruption
         # (unterminated quote → shell EOF).
-        text = 'curl -H "Authorization: Bearer sk-abcdef1234567890"'
+        secret = "fixture-" + "double-quote-token"
+        text = 'curl -H "Authorization: Bearer ' + secret + '"'
         result = redact_sensitive_text(text)
-        assert "sk-abcdef1234567890" not in result
+        assert secret not in result
         assert result.count('"') == 2, result  # both quotes survive
         assert result.endswith('"'), result
 
     def test_token_flush_against_single_quote_preserves_quote(self):
         # Regression for #43083: same as above with single quotes (Python
         # f-string context). The closing ' must survive the mask.
-        text = "auth = f'Authorization: Bearer {placeholder}'"
+        secret = "fixture-" + "single-quote-token"
+        text = "auth = f'Authorization: Bearer " + secret + "'"
         result = redact_sensitive_text(text)
+        assert secret not in result
         assert result.count("'") == 2, result
         assert result.endswith("'"), result
 
+    def test_json_non_secret_key_name_unchanged(self):
+        text = '{"authorization_status": "approved"}'
+        assert redact_sensitive_text(text) == text
 
-class TestApiKeyHeaders:
     def test_x_api_key_header_masked(self):
-        text = "x-api-key: opaque-provider-key-1234567890"
+        secret = "fixture-" + "provider-key-for-redaction"
+        text = "x-api-key: " + secret
         result = redact_sensitive_text(text)
         assert "x-api-key:" in result
-        assert "opaque-provider-key" not in result
+        assert secret not in result
+        assert "..." in result
 
     def test_x_api_key_in_curl_command_masked(self):
-        text = 'curl -H "x-api-key: sk-local-VERYsecret-999888" https://api.example.com'
+        secret = "fixture-" + "curl-header-key"
+        text = 'curl -H "x-api-key: ' + secret + '" https://api.example.com'
         result = redact_sensitive_text(text)
-        assert "VERYsecret" not in result
+        assert secret not in result
         assert "https://api.example.com" in result
 
     def test_api_key_header_masked(self):
