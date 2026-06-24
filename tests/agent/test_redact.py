@@ -211,7 +211,7 @@ class TestAuthHeaders:
         result = redact_sensitive_text(text)
         assert "x-api-key:" in result
         assert secret not in result
-        assert "..." in result
+        assert "***" in result
 
     def test_x_api_key_in_curl_command_masked(self):
         secret = "fixture-" + "curl-header-key"
