@@ -181,6 +181,28 @@ def test_on_session_end_ingests_clean_messages(provider):
     assert provider._session_turns == []
 
 
+def test_auto_capture_false_suppresses_all_session_ingest(provider):
+    provider._auto_capture = False
+
+    provider._session_turns = [{"user": "buffered user", "assistant": "buffered assistant"}]
+    provider.on_session_end([
+        {"role": "user", "content": "do not ingest me"},
+        {"role": "assistant", "content": "also do not ingest me"},
+    ])
+    assert provider._client.ingest_calls == []
+    assert provider._session_turns == []
+
+    provider._session_turns = [{"user": "old session", "assistant": "old assistant"}]
+    provider.on_session_switch("session-2")
+    assert provider._client.ingest_calls == []
+    assert provider._session_id == "session-2"
+    assert provider._session_turns == []
+
+    provider._session_turns = [{"user": "shutdown user", "assistant": "shutdown assistant"}]
+    provider.shutdown()
+    assert provider._client.ingest_calls == []
+
+
 def test_merge_metadata_stamps_sm_source():
     # sm_source routes Hermes writes into the "Hermes" Space in the Supermemory
     # app (functional routing, not telemetry) — must always be present.
