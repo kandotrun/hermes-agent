@@ -140,6 +140,18 @@ def test_identity_prompt_names_the_bot():
     assert "not a mention of you" in prompt
 
 
+def test_identity_prompt_does_not_reject_gateway_routed_unmentioned_turns():
+    """DM/free-response/thread turns are valid even without a bot mention."""
+    adapter = _make_adapter()
+    adapter._bot_display_name = "TestBot"
+    adapter._team_bot_names = {}
+
+    prompt = adapter._build_identity_prompt(team_id="T1")
+
+    assert "Do not require an @TestBot mention" in prompt
+    assert "Only treat a message as directed at you when it mentions" not in prompt
+
+
 def test_identity_prompt_prefers_per_team_name():
     adapter = _make_adapter()
     adapter._bot_display_name = "PrimaryBot"

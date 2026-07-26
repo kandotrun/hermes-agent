@@ -3926,6 +3926,11 @@ class SlackAdapter(BasePlatformAdapter):
         being addressed. Inbound mentions are rendered as ``@DisplayName``
         (see :meth:`_humanize_user_mentions`), so naming the bot's own display
         name here gives the agent a positive anchor for "that's me."
+
+        Relevance is decided before this prompt is built: DMs, configured
+        free-response channels, and active bot threads may all be valid without
+        a literal bot mention. The model must therefore not re-apply a stricter
+        mention gate after the adapter has already admitted the turn.
         """
         name = (
             (team_id and self._team_bot_names.get(team_id))
@@ -3937,10 +3942,10 @@ class SlackAdapter(BasePlatformAdapter):
         return (
             f"You are connected to this Slack workspace as the bot "
             f'"@{name}". In messages, each line is prefixed with the sender\'s '
-            f"name, and mentions are shown as @DisplayName. Only treat a "
-            f'message as directed at you when it mentions "@{name}" '
-            f"specifically; a mention of any other participant is not a "
-            f"mention of you, even if their name is similar."
+            f"name, and mentions are shown as @DisplayName. The current incoming "
+            f"turn has already passed Slack gateway routing. Do not require an "
+            f"@{name} mention before responding. A mention of any other participant "
+            f"is not a mention of you, even if their name is similar."
         )
 
     async def _resolve_user_is_bot(

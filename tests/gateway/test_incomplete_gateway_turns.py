@@ -107,7 +107,7 @@ def _make_runner(adapter: CaptureSlackAdapter) -> gateway_run.GatewayRunner:
     return runner
 
 
-def _make_event() -> MessageEvent:
+def _make_event(*, is_bot: bool = False) -> MessageEvent:
     return MessageEvent(
         text="hello",
         source=SessionSource(
@@ -116,6 +116,7 @@ def _make_event() -> MessageEvent:
             chat_type="channel",
             thread_id="171717",
             user_id="U123",
+            is_bot=is_bot,
         ),
         message_id="m-1",
     )
@@ -157,7 +158,9 @@ def test_interrupted_or_failed_turns_are_not_classified_hidden():
 
 
 @pytest.mark.asyncio
-async def test_incomplete_codex_turn_stays_out_of_slack_transcript(monkeypatch, tmp_path):
+async def test_incomplete_codex_turn_notifies_human_without_persisting_error(
+    monkeypatch, tmp_path
+):
     adapter = CaptureSlackAdapter()
     runner = _make_runner(adapter)
 
@@ -175,7 +178,12 @@ async def test_incomplete_codex_turn_stays_out_of_slack_transcript(monkeypatch, 
     event = _make_event()
     await adapter._process_message_background(event, build_session_key(event.source))
 
-    assert adapter.sent == []
+    assert len(adapter.sent) == 1
+    assert adapter.sent[0]["content"] == (
+        "⚠️ The model finished reasoning but did not produce a final answer. "
+        "Please send your message again."
+    )
+    assert "remained incomplete after" not in adapter.sent[0]["content"]
     assert runner.session_store.update_session.called
 
     transcript_roles = [
@@ -188,3 +196,25 @@ async def test_incomplete_codex_turn_stays_out_of_slack_transcript(monkeypatch, 
         ("start", "m-1"),
         ("complete", "m-1", ProcessingOutcome.SUCCESS),
     ]
+
+
+@pytest.mark.asyncio
+async def test_incomplete_codex_turn_from_bot_stays_silent(monkeypatch, tmp_path):
+    adapter = CaptureSlackAdapter()
+    runner = _make_runner(adapter)
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    monkeypatch.setattr(
+        "agent.model_metadata.get_model_context_length",
+        lambda *_args, **_kwargs: 100,
+    )
+    monkeypatch.setenv("SLACK_HOME_CHANNEL", "C123")
+
+    adapter.set_message_handler(runner._handle_message)
+    adapter._keep_typing = lambda *_args, **_kwargs: asyncio.Event().wait()
+
+    event = _make_event(is_bot=True)
+    await adapter._process_message_background(event, build_session_key(event.source))
+
+    assert adapter.sent == []

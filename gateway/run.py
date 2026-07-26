@@ -14469,12 +14469,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             response = agent_result.get("final_response") or ""
             # Hidden-reasoning-only retry exhaustion: the loop's sentinel text
             # ("Codex response remained incomplete after 3 continuation
-            # attempts") doubles as final_response, so it would be delivered
-            # verbatim into the channel — where peer agents can ingest it as a
-            # completed assistant turn (#51628). Blank it here so the normal
-            # empty-response handling (and the suppression below) applies.
+            # attempts") doubles as final_response, so it must never be
+            # delivered verbatim into the channel. Human senders get a short,
+            # actionable retry notice instead of unexplained silence; bot
+            # senders stay silent so peer agents cannot ingest the failure as a
+            # completed assistant turn and start an acknowledgement loop.
             if _is_gateway_hidden_reasoning_incomplete_turn(agent_result):
-                response = ""
+                response = (
+                    ""
+                    if getattr(source, "is_bot", False)
+                    else (
+                        "⚠️ The model finished reasoning but did not produce a "
+                        "final answer. Please send your message again."
+                    )
+                )
             try:
                 from gateway.response_filters import is_intentional_silence_agent_result
                 _intentional_silence = is_intentional_silence_agent_result(
