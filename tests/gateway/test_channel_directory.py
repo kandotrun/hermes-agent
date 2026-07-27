@@ -520,14 +520,14 @@ class TestBuildSlack:
         good = _make_slack_client([
             {
                 "ok": True,
-                "channels": [{"id": "C999", "name": "ok-channel", "is_private": False}],
+                "channels": [{"id": "C0999", "name": "ok-channel", "is_private": False}],
                 "response_metadata": {},
             },
         ])
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
             entries = asyncio.run(_build_slack(_make_slack_adapter({"BAD": bad, "GOOD": good})))
 
-        assert {e["id"] for e in entries} == {"C999"}
+        assert {e["id"] for e in entries} == {"C0999"}
 
     def test_session_dms_merged_when_not_in_api_results(self, tmp_path):
         sessions_path = tmp_path / "sessions" / "sessions.json"
@@ -550,6 +550,79 @@ class TestBuildSlack:
         assert "C001" in ids and "D456" in ids
         # Channel ID from API should not be duplicated by the session merge
         assert sum(1 for e in entries if e["id"] == "C001") == 1
+
+    def test_thread_targets_reuse_api_channel_name_without_per_thread_calls(self):
+        """Slack threads share their base channel name and need no extra API calls."""
+        client = _make_slack_client([
+            {
+                "ok": True,
+                "channels": [{"id": "C001", "name": "engineering", "is_private": True}],
+                "response_metadata": {},
+            },
+        ])
+        client.conversations_info = AsyncMock(
+            side_effect=AssertionError("thread targets must not hit conversations.info")
+        )
+        session_entries = [
+            {
+                "id": "C001:111.1",
+                "name": "C001 / topic 111.1",
+                "type": "group",
+                "thread_id": "111.1",
+            },
+            {
+                "id": "C001:222.2",
+                "name": "C001 / topic 222.2",
+                "type": "group",
+                "thread_id": "222.2",
+            },
+        ]
+
+        with patch(
+            "gateway.channel_directory._build_from_sessions",
+            return_value=session_entries,
+        ):
+            entries = asyncio.run(_build_slack(_make_slack_adapter({"T1": client})))
+
+        names = {entry["id"]: entry["name"] for entry in entries}
+        assert names["C001:111.1"] == "engineering / topic 111.1"
+        assert names["C001:222.2"] == "engineering / topic 222.2"
+        client.conversations_info.assert_not_awaited()
+
+    def test_unknown_thread_channel_is_resolved_once_by_base_id(self):
+        """Multiple threads in one unknown channel share one conversations.info call."""
+        client = _make_slack_client([
+            {"ok": True, "channels": [], "response_metadata": {}},
+        ])
+        client.conversations_info = AsyncMock(
+            return_value={"ok": True, "channel": {"name": "private-room"}}
+        )
+        session_entries = [
+            {
+                "id": "C0999:111.1",
+                "name": "C0999 / topic 111.1",
+                "type": "group",
+                "thread_id": "111.1",
+            },
+            {
+                "id": "C0999:222.2",
+                "name": "C0999 / topic 222.2",
+                "type": "group",
+                "thread_id": "222.2",
+            },
+        ]
+
+        with patch(
+            "gateway.channel_directory._build_from_sessions",
+            return_value=session_entries,
+        ):
+            entries = asyncio.run(_build_slack(_make_slack_adapter({"T1": client})))
+
+        assert client.conversations_info.await_count == 1
+        client.conversations_info.assert_awaited_once_with(channel="C0999")
+        names = {entry["id"]: entry["name"] for entry in entries}
+        assert names["C0999:111.1"] == "private-room / topic 111.1"
+        assert names["C0999:222.2"] == "private-room / topic 222.2"
 
     def test_skips_channels_with_no_id_or_name(self, tmp_path):
         client = _make_slack_client([

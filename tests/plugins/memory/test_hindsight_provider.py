@@ -1340,9 +1340,14 @@ class TestSessionSwitchBufferFlush:
 
 class TestUpdateModeAppendCapability:
     def _clear_capability_cache(self):
-        from plugins.memory.hindsight import _append_capability_cache, _append_capability_lock
+        from plugins.memory.hindsight import (
+            _append_capability_cache,
+            _append_capability_lock,
+            _store_document_text_cache,
+        )
         with _append_capability_lock:
             _append_capability_cache.clear()
+            _store_document_text_cache.clear()
 
     def test_legacy_api_falls_back_to_per_process_doc_id(self, provider, monkeypatch):
         """API returns no /version (or pre-0.5.0) — sync_turn must use the
@@ -1377,6 +1382,38 @@ class TestUpdateModeAppendCapability:
         assert kw["document_id"] == "test-session"
         item = kw["items"][0]
         assert item["update_mode"] == "append"
+
+    def test_modern_api_without_document_text_falls_back_without_append(
+        self, provider, monkeypatch
+    ):
+        """A modern API cannot append when raw document text storage is disabled."""
+        self._clear_capability_cache()
+        payload = json.dumps({
+            "api_version": "0.8.4",
+            "features": {"store_document_text": False},
+        }).encode("utf-8")
+
+        class _Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return payload
+
+        monkeypatch.setattr(
+            "urllib.request.urlopen", lambda *_args, **_kwargs: _Response()
+        )
+        old_doc = provider._document_id
+        provider.sync_turn("hello", "hi")
+        provider._retain_queue.join()
+
+        kw = provider._client.aretain_batch.call_args.kwargs
+        assert kw["document_id"] == old_doc
+        assert kw["document_id"].startswith("test-session-")
+        assert "update_mode" not in kw["items"][0]
 
     def test_capability_cached_per_url(self, provider, monkeypatch):
         """The /version probe must run at most once per (process, api_url)."""

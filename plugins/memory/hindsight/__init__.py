@@ -168,6 +168,10 @@ def _ensure_cloud_client_dependency() -> None:
 # Probed once per URL per process — every provider talking to the same API
 # gets the same answer without re-hitting /version on each initialize().
 _append_capability_cache: Dict[str, bool] = {}
+# `/version` also reports whether the server retains raw document text.
+# Hindsight cannot implement update_mode='append' when that storage is off,
+# even on API versions that otherwise support the parameter.
+_store_document_text_cache: Dict[str, bool | None] = {}
 _append_capability_lock = threading.Lock()
 
 
@@ -207,6 +211,12 @@ def _fetch_hindsight_api_version(api_url: str, api_key: str | None = None,
         return None
     if not isinstance(data, dict):
         return None
+    features = data.get("features")
+    store_document_text: bool | None = None
+    if isinstance(features, dict) and isinstance(features.get("store_document_text"), bool):
+        store_document_text = features["store_document_text"]
+    with _append_capability_lock:
+        _store_document_text_cache[api_url.rstrip("/")] = store_document_text
     version = data.get("version") or data.get("api_version")
     return str(version) if version else None
 
@@ -225,7 +235,12 @@ def _check_api_supports_update_mode_append(api_url: str,
         if api_url in _append_capability_cache:
             return _append_capability_cache[api_url]
     version = _fetch_hindsight_api_version(api_url, api_key)
-    supported = _meets_minimum_version(version, _MIN_VERSION_FOR_UPDATE_MODE_APPEND)
+    with _append_capability_lock:
+        store_document_text = _store_document_text_cache.get(api_url.rstrip("/"))
+    supported = (
+        _meets_minimum_version(version, _MIN_VERSION_FOR_UPDATE_MODE_APPEND)
+        and store_document_text is not False
+    )
     with _append_capability_lock:
         # Re-check after acquiring the lock in case a concurrent probe filled it.
         cached = _append_capability_cache.get(api_url)
@@ -233,7 +248,14 @@ def _check_api_supports_update_mode_append(api_url: str,
             _append_capability_cache[api_url] = supported
         else:
             supported = cached
-    if not supported:
+    if store_document_text is False:
+        logger.warning(
+            "Hindsight API at %s has store_document_text disabled; "
+            "update_mode='append' is unavailable. Falling back to a "
+            "per-process document_id so automatic retains still succeed.",
+            api_url,
+        )
+    elif not supported:
         logger.warning(
             "Hindsight API at %s reports version %r, older than %s. "
             "Falling back to per-process document_id — retains across "

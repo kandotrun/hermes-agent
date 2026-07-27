@@ -25,6 +25,14 @@ def db(tmp_path):
         pass
 
 
+class TestWalJournalSizeLimit:
+    """Reusable WAL files should not retain an unbounded historical peak."""
+
+    def test_session_db_caps_reusable_wal_at_64_mib(self, db):
+        limit = db._conn.execute("PRAGMA journal_size_limit").fetchone()[0]
+        assert limit == 64 * 1024 * 1024
+
+
 class TestTryWalCheckpointPassive:
     """_try_wal_checkpoint() should use PASSIVE mode for periodic use."""
 

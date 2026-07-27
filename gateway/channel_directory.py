@@ -259,6 +259,26 @@ def _slack_api_error_code(error: Exception) -> Optional[str]:
     return None
 
 
+def _slack_entry_base_id(entry: Dict[str, Any]) -> str:
+    """Return the real Slack channel ID for a cached channel/thread target."""
+    entry_id = str(entry.get("id") or "")
+    thread_id = entry.get("thread_id")
+    if thread_id:
+        suffix = f":{thread_id}"
+        if entry_id.endswith(suffix):
+            return entry_id[: -len(suffix)]
+    return entry_id
+
+
+def _slack_apply_resolved_base_name(
+    entry: Dict[str, Any], base_id: str, resolved_name: str
+) -> None:
+    """Replace only the raw base ID, preserving a thread/topic suffix."""
+    current_name = str(entry.get("name") or "")
+    suffix = current_name[len(base_id) :] if current_name.startswith(base_id) else ""
+    entry["name"] = f"{resolved_name}{suffix}"
+
+
 async def _build_slack(adapter) -> List[Dict[str, Any]]:
     """List Slack channels the bot has joined across all workspaces.
 
@@ -329,40 +349,65 @@ async def _build_slack(adapter) -> List[Dict[str, Any]]:
         if eid not in seen_ids:
             # If the entry name is still a raw Slack ID (e.g. C0xxx / D0xxx),
             # try to resolve it from the API lookup first.
+            base_id = _slack_entry_base_id(entry)
             if entry.get("name", "").startswith(("C0", "D0", "G0")):
-                if eid in api_name_lookup:
-                    entry["name"] = api_name_lookup[eid]
+                if base_id in api_name_lookup:
+                    _slack_apply_resolved_base_name(
+                        entry, base_id, api_name_lookup[base_id]
+                    )
             channels.append(entry)
             seen_ids.add(eid)
 
     # Resolve remaining raw-ID entries (DMs, private channels not in bot scope)
-    # by calling conversations.info + users.info for each.
+    # by calling conversations.info + users.info once per *base channel*.
+    # A single Slack channel can have thousands of thread-scoped session targets;
+    # sending `C123:thread_ts` to conversations.info is both invalid and causes a
+    # multi-minute serial API loop during gateway startup.
     unresolved = [ch for ch in channels if ch.get("name", "").startswith(("C0", "D0", "G0"))]
     if unresolved and team_clients:
         client = next(iter(team_clients.values()))
+        unresolved_by_base: Dict[str, List[Dict[str, Any]]] = {}
         for entry in unresolved:
+            base_id = _slack_entry_base_id(entry)
+            if base_id:
+                unresolved_by_base.setdefault(base_id, []).append(entry)
+
+        for base_id, entries in unresolved_by_base.items():
             try:
-                resp = await client.conversations_info(channel=entry["id"])
+                resp = await client.conversations_info(channel=base_id)
                 if not resp.get("ok"):
                     continue
                 ch_info = resp.get("channel", {})
+                resolved_name = None
+                resolved_type = None
                 if ch_info.get("is_im"):
                     peer_user = ch_info.get("user", "")
                     if peer_user:
                         user_resp = await client.users_info(user=peer_user)
                         if user_resp.get("ok"):
                             u = user_resp["user"]
-                            entry["name"] = (
+                            resolved_name = (
                                 u.get("profile", {}).get("display_name")
                                 or u.get("real_name")
                                 or u.get("name")
-                                or entry["id"]
+                                or base_id
                             )
-                            entry["type"] = "dm"
+                            resolved_type = "dm"
                 else:
-                    entry["name"] = ch_info.get("name") or ch_info.get("name_normalized") or entry["id"]
+                    resolved_name = (
+                        ch_info.get("name")
+                        or ch_info.get("name_normalized")
+                        or base_id
+                    )
+                if resolved_name:
+                    for entry in entries:
+                        _slack_apply_resolved_base_name(
+                            entry, base_id, resolved_name
+                        )
+                        if resolved_type:
+                            entry["type"] = resolved_type
             except Exception as e:
-                logger.debug("Channel directory: failed to resolve %s: %s", entry["id"], e)
+                logger.debug("Channel directory: failed to resolve %s: %s", base_id, e)
                 continue
 
     return channels

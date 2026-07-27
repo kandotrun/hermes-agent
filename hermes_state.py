@@ -300,6 +300,12 @@ FTS_STORAGE_VERSION = 1
 # sanitizer/runtime behavior predictable under adversarial input.
 MAX_FTS5_QUERY_CHARS = 2_048
 
+# Keep a completed checkpoint from leaving behind an arbitrarily large,
+# sparse reusable WAL file. The limit is applied per SessionDB connection and
+# does not discard uncheckpointed frames; SQLite only truncates after a safe
+# checkpoint/reset.
+_WAL_JOURNAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024
+
 # ---------------------------------------------------------------------------
 # WAL-compatibility fallback
 # ---------------------------------------------------------------------------
@@ -939,11 +945,13 @@ def preflight_db_writability(
             _ensure_writable(p)
 
 
-def _db_opens_cleanly(db_path: Path) -> Optional[str]:
+def _db_opens_cleanly(
+    db_path: Path, *, full_integrity: bool = True
+) -> Optional[str]:
     """Probe a DB on a fresh connection. Returns None if healthy, else a reason.
 
     Runs the same first-statement (``PRAGMA journal_mode``) that trips the
-    malformed-schema parse, then ``PRAGMA integrity_check`` and a canonical
+    malformed-schema parse, optionally ``PRAGMA integrity_check``, a canonical
     ``sessions`` read, and finally a rolled-back ``messages`` write so that
     FTS5 index corruption — which leaves base-table reads and
     ``integrity_check`` passing while every ``INSERT INTO messages`` fails
@@ -960,10 +968,11 @@ def _db_opens_cleanly(db_path: Path) -> Optional[str]:
         # working), so tokenizer absence must never classify as corruption.
         load_fts5_cjk_extension(conn)
         conn.execute("PRAGMA journal_mode").fetchone()
-        rows = conn.execute("PRAGMA integrity_check").fetchall()
-        problems = [str(r[0]) for r in rows if r and str(r[0]).lower() != "ok"]
-        if problems:
-            return "; ".join(problems[:3])
+        if full_integrity:
+            rows = conn.execute("PRAGMA integrity_check").fetchall()
+            problems = [str(r[0]) for r in rows if r and str(r[0]).lower() != "ok"]
+            if problems:
+                return "; ".join(problems[:3])
         conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
 
         # FTS5 read probe: run a representative MATCH query against the
@@ -2122,9 +2131,15 @@ class SessionDB:
                     isolation_level=None,
                 )
                 self._conn.row_factory = sqlite3.Row
-                self._wal_active = (
-                    apply_wal_with_fallback(self._conn, db_label="state.db") == "wal"
+                journal_mode = apply_wal_with_fallback(
+                    self._conn, db_label="state.db"
                 )
+                self._wal_active = journal_mode == "wal"
+                if self._wal_active:
+                    self._conn.execute(
+                        "PRAGMA journal_size_limit="
+                        f"{_WAL_JOURNAL_SIZE_LIMIT_BYTES}"
+                    )
                 self._conn.execute("PRAGMA foreign_keys=ON")
                 self._fts_cjk_loaded = load_fts5_cjk_extension(self._conn)
                 self._init_schema()
